@@ -13,8 +13,8 @@ const Home = ({ onStart }) => {
   ];
 
   const times = [
-    { value: 10, label: '10 minutes' },
-    { value: 20, label: '20 minutes' }
+    { value: 1, label: '1 minute' },
+    { value: 2, label: '2 minutes' }
   ];
 
   const customSelectStyles = {

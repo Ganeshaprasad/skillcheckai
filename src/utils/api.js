@@ -132,8 +132,48 @@ export const fetchQuestions = async (topic, duration) => {
 };
 
 export const getFollowUpQuestion = async (topic, currentQuestion, candidateAnswer) => {
-  if (!candidateAnswer || candidateAnswer.trim().length < 20) {
+  if (!candidateAnswer || candidateAnswer.trim().length < 5) {
     return null;
+  }
+
+  const answerLower = candidateAnswer.toLowerCase();
+  
+  // Check if user didn't understand the question
+  const didntUnderstand = 
+    answerLower.includes('repeat') || 
+    answerLower.includes("don't understand") ||
+    answerLower.includes("didn't understand") ||
+    answerLower.includes('rephrase') ||
+    answerLower.includes('explain what') ||
+    answerLower.includes('what do you mean');
+
+  if (didntUnderstand) {
+    // User didn't understand - rephrase the original question
+    try {
+      const response = await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [{
+          role: 'user',
+          content: `Rephrase this question in simpler, clearer language that's easier to understand. Keep the same meaning but use simpler words and sentence structure. Output ONLY the rephrased question.
+
+Original question: "${currentQuestion}"`
+        }]
+      });
+
+      const rephrased = response.choices[0].message.content?.trim() || currentQuestion;
+      return {
+        type: 'rephrase',
+        text: rephrased
+      };
+    } catch (error) {
+      console.error('Rephrase error:', error);
+      return null;
+    }
+  }
+
+  // User understood but gave incomplete answer - ask elaboration
+  if (candidateAnswer.length < 50) {
+    return null;  // Move to next question if answer too short
   }
 
   try {
@@ -141,7 +181,7 @@ export const getFollowUpQuestion = async (topic, currentQuestion, candidateAnswe
       model: 'gpt-4o-mini',
       messages: [{
         role: 'user',
-        content: `You are a ${topic} interviewer. Based on this answer, decide if follow-up is needed. If yes, ask ONE follow-up. If no or excellent, say "NO_FOLLOWUP". Output only the follow-up question or "NO_FOLLOWUP".
+        content: `You are a ${topic} interviewer. The candidate gave an answer. Decide: should you ask ONE follow-up to elaborate? If yes, ask a specific follow-up about their answer. If no, say "NO_FOLLOWUP". Output only the follow-up question or "NO_FOLLOWUP".
 
 Current Question: "${currentQuestion}"
 Candidate's Answer: "${candidateAnswer}"`
@@ -154,7 +194,10 @@ Candidate's Answer: "${candidateAnswer}"`
       return null;
     }
 
-    return result;
+    return {
+      type: 'followup',
+      text: result
+    };
   } catch (error) {
     console.error('Follow-up error:', error);
     return null;
@@ -174,6 +217,9 @@ export const getFeedback = async (questions, answers, topic) => {
   console.log('🔍 Getting feedback for:', { topicCount: questions.length, answersCount: answers.length });
   
   const safeAnswers = answers && answers.length ? answers : questions.map(() => ({ ans: 'No answer given' }));
+  
+  // Get actual questions asked (which may include rephrased or follow-up questions)
+  const actualQuestions = safeAnswers.map((a) => a.question || questions[a.q] || 'Question not found');
 
   try {
     const prompt = `You are a VERY STRICT ${topic} technical interviewer rating candidate's answers. Be HARSH - do NOT give high marks easily.
@@ -216,7 +262,7 @@ Feedback: Excellent! You clearly explained implicit, explicit, and fluent waits 
 
 NOW RATE THESE STRICTLY:
 
-${questions.map((q, i) => `Q${i + 1}: ${q}`).join('\n\n')}
+${actualQuestions.map((q, i) => `Q${i + 1}: ${q}`).join('\n\n')}
 
 CANDIDATE ANSWERS:
 ${safeAnswers.map((a, i) => {

@@ -5,16 +5,58 @@ export const speakQuestion = async (text) => {
     try {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.rate = 0.9;
-      utterance.pitch = 1.3;
+      utterance.pitch = 1.5;  // Higher pitch for female voice
       utterance.volume = 1.0;
 
-      const voices = window.speechSynthesis.getVoices();
+      // Wait for voices to be loaded
+      const loadVoices = () => {
+        const voices = window.speechSynthesis.getVoices();
+        
+        if (voices.length === 0) {
+          console.log('Voices still loading...');
+          return null;
+        }
+        
+        // Priority: Female Google voice
+        let selectedVoice = voices.find(v => 
+          v.name.includes('Google') && v.name.toLowerCase().includes('female')
+        );
+        
+        // Second: Any female voice
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => 
+            v.name.toLowerCase().includes('female') && v.lang.startsWith('en')
+          );
+        }
+        
+        // Third: Female voices without male in name
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => 
+            !v.name.toLowerCase().includes('male') && 
+            v.lang.startsWith('en') &&
+            !v.name.toLowerCase().includes('samantha') // Skip bots with ambiguous names
+          );
+        }
+        
+        // Last resort: Use voices[1] or [0] if available (usually different from default)
+        if (!selectedVoice && voices.length > 1) {
+          selectedVoice = voices[1];
+        }
+        if (!selectedVoice && voices.length > 0) {
+          selectedVoice = voices[0];
+        }
+        
+        return selectedVoice;
+      };
       
-      let selectedVoice = voices.find(v => v.lang === 'en-IN' && v.name.toLowerCase().includes('female'));
-      if (!selectedVoice) selectedVoice = voices.find(v => v.lang === 'en-IN');
-      if (!selectedVoice) selectedVoice = voices.find(v => v.lang.startsWith('en') && v.name.toLowerCase().includes('female'));
-      if (!selectedVoice) selectedVoice = voices.find(v => !v.name.toLowerCase().includes('male') && v.lang.startsWith('en'));
-      if (!selectedVoice) selectedVoice = voices[1] || voices[0];
+      // Try to load voices, with fallback
+      let selectedVoice = loadVoices();
+      if (!selectedVoice && window.speechSynthesis.onvoiceschanged) {
+        window.speechSynthesis.onvoiceschanged = () => {
+          selectedVoice = loadVoices();
+          if (selectedVoice) utterance.voice = selectedVoice;
+        };
+      }
 
       if (selectedVoice) {
         utterance.voice = selectedVoice;

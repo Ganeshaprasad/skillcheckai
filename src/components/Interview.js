@@ -214,14 +214,80 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
   };
 
   return (
-    <div style={{
+    <div className="interview-wrapper" style={{
       height: '100vh', background: '#1a1a1a', color: 'white',
-      display: 'flex', padding: '20px', gap: '20px'
+      display: 'flex', padding: '20px', gap: '20px', flexDirection: 'row'
     }}>
-      {/* LEFT: Camera - BACK TO 400px */}
-      <div style={{
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.6; }
+        }
+        
+        @keyframes ellipsis {
+          0%, 20% { content: ''; }
+          40% { content: '.'; }
+          60% { content: '..'; }
+          80%, 100% { content: '...'; }
+        }
+        
+        @media (max-width: 1023px) {
+          .interview-wrapper {
+            flex-direction: column !important;
+            height: auto !important;
+            min-height: 100vh !important;
+          }
+          .camera-section {
+            flex: 0 !important;
+            width: 100% !important;
+            justify-content: flex-start !important;
+            order: 1 !important;
+          }
+          .transcript-section {
+            flex: 1 !important;
+            width: 100% !important;
+            min-height: 250px !important;
+            padding: 20px !important;
+            order: 2 !important;
+          }
+          .button-group {
+            flex-direction: row !important;
+            width: 100% !important;
+            order: 3 !important;
+            margin-top: 15px !important;
+            gap: 10px !important;
+            justify-content: flex-end !important;
+            padding: 0 20px !important;
+          }
+          .button-group button {
+            flex: 1 !important;
+            padding: 12px !important;
+            font-size: 14px !important;
+          }
+          .video-stream {
+            width: 100% !important;
+            height: auto !important;
+            max-width: 100% !important;
+            aspect-ratio: 1 !important;
+            margin-bottom: 20px !important;
+          }
+        }
+        
+        @media (max-width: 480px) {
+          .video-stream {
+            max-height: 60vw !important;
+          }
+          .button-group button {
+            font-size: 12px !important;
+            padding: 10px !important;
+          }
+        }
+      `}</style>
+
+      {/* LEFT: Camera */}
+      <div className="camera-section" style={{
         flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-        justifyContent: 'center', position: 'relative'
+        justifyContent: 'center', position: 'relative', order: 1
       }}>
         <div style={{
           position: 'absolute', top: 20, left: 20,
@@ -231,10 +297,11 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           ⏱️ {formatTime(timeLeft)}
         </div>
 
-        {/* CAMERA - 400px (not overlapping) */}
+        {/* CAMERA - 400px */}
         <video
           ref={videoRef}
           autoPlay muted
+          className="video-stream"
           style={{
             width: '400px', height: '400px', objectFit: 'cover',
             borderRadius: '20px',
@@ -246,9 +313,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           }}
         />
 
-        {/* NO INDICATORS BELOW CAMERA - Moved to right panel */}
-
-        <div style={{ marginTop: '30px', display: 'flex', gap: '15px' }}>
+        <div className="button-group" style={{ marginTop: '30px', display: 'flex', gap: '15px' }}>
           <button
             onClick={handleSubmitAnswer}
             disabled={isAISpeaking || loading || (!finalAnswer && !liveTranscript)}
@@ -273,16 +338,16 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
               transition: 'background 0.3s ease'
             }}
           >
-            <X size={20} /> Quit
+            Quit
           </button>
         </div>
       </div>
 
       {/* RIGHT: Transcript with Status */}
-      <div style={{
+      <div className="transcript-section" style={{
         flex: 1, display: 'flex', flexDirection: 'column',
         background: 'rgba(255,255,255,0.05)', borderRadius: '20px',
-        padding: '30px', border: '2px solid #0078d4', gap: '20px'
+        padding: '30px', border: '2px solid #0078d4', gap: '20px', order: 2
       }}>
         <div style={{
           padding: '20px', background: 'rgba(0,120,212,0.2)',
@@ -296,74 +361,55 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           </p>
         </div>
 
-        {/* Status in Transcript Area */}
-        {isAISpeaking && (
-          <div style={{
-            padding: '15px',
-            background: 'rgba(255, 152, 0, 0.2)',
-            border: '2px solid #FF9800',
-            borderRadius: '10px',
-            textAlign: 'center',
-            fontSize: '16px',
-            fontWeight: 'bold',
-            color: '#FFB74D'
-          }}>
-            🎙️ AI is asking the question...
-          </div>
-        )}
-
-        {isListening && !isAISpeaking && (
-          <div style={{
-            padding: '15px',
-            background: 'rgba(76, 175, 80, 0.2)',
-            border: '2px solid #4CAF50',
-            borderRadius: '10px',
-            textAlign: 'center',
-            fontSize: '16px',
-            fontWeight: 'bold',
-            color: '#81C784'
-          }}>
-            🎤 Listening to your answer...
-          </div>
-        )}
-
         <div style={{
           padding: '20px', background: 'rgba(255,255,255,0.1)',
           borderRadius: '15px', flex: 1, overflowY: 'auto',
           minHeight: '200px'
         }}>
-          <strong style={{ fontSize: '14px', color: '#aaa' }}>YOUR RESPONSE:</strong>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px' }}>
+            <strong style={{ fontSize: '14px', color: '#aaa' }}>YOUR RESPONSE:</strong>
+            {isAISpeaking && (
+              <span style={{ fontSize: '14px', color: '#FFB74D', fontStyle: 'italic' }}>
+                🎙️ AI is asking the question<span style={{
+                  animation: 'ellipsis 1.5s infinite',
+                  display: 'inline-block',
+                  width: '20px',
+                  textAlign: 'left'
+                }}>...</span>
+              </span>
+            )}
+            {isListening && !isAISpeaking && (
+              <span style={{ fontSize: '14px', color: '#4CAF50', fontStyle: 'italic' }}>
+                🎤 Listening<span style={{
+                  animation: 'ellipsis 1.5s infinite',
+                  display: 'inline-block',
+                  width: '20px',
+                  textAlign: 'left'
+                }}>...</span>
+              </span>
+            )}
+            {loading && !isAISpeaking && !isListening && (
+              <span style={{ fontSize: '14px', color: '#FFC107', fontStyle: 'italic' }}>
+                ⏳ Analyzing your answer<span style={{
+                  animation: 'ellipsis 1.5s infinite',
+                  display: 'inline-block',
+                  width: '20px',
+                  textAlign: 'left'
+                }}>...</span>
+              </span>
+            )}
+          </div>
           <p style={{
-            marginTop: '10px', fontSize: '16px',
-            color: isListening ? '#4CAF50' : '#fff',
-            fontStyle: isListening ? 'italic' : 'normal',
+            marginTop: '0px', fontSize: '16px',
+            color: '#fff',
             whiteSpace: 'pre-wrap',
-            lineHeight: '1.6'
+            lineHeight: '1.6',
+            minHeight: '50px'
           }}>
             {liveTranscript || finalAnswer || '(Waiting for you to speak...)'}
           </p>
         </div>
-
-        {loading && (
-          <div style={{
-            color: '#FFC107',
-            textAlign: 'center',
-            fontWeight: 'bold',
-            padding: '12px',
-            background: 'rgba(255, 193, 7, 0.2)',
-            borderRadius: '10px'
-          }}>
-            ⏳ Analyzing your answer...
-          </div>
-        )}
       </div>
-
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; }
-          50% { opacity: 0.6; }
-        }
-      `}</style>
     </div>
   );
 };

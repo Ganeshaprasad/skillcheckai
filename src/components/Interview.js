@@ -110,7 +110,8 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
         setIsListening(false);
         setFollowUpAskedForQ(false);
 
-        // Stop any existing recognition
+        // Stop any existing speech and recognition
+        stopSpeaking(); // Stop any ongoing speech
         if (recognitionRef.current) {
           try {
             if (recognitionRef.current.cancel) recognitionRef.current.cancel();
@@ -119,7 +120,8 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
             console.log('Recognition cleanup');
           }
         }
-
+        
+        await new Promise(r => setTimeout(r, 500));
         await speakQuestion(questions[currentQ]);
         setIsAISpeaking(false);
         
@@ -137,7 +139,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
       askQuestion();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentQ, questions, hasStartedAsking, answers, topic, onQuit, onFinish]);
+  }, [currentQ, questions, hasStartedAsking, topic, onQuit, onFinish]);
 
   const stopCamera = () => {
     if (recognitionRef.current) {
@@ -224,19 +226,6 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
 
       recognitionRef.current = session;
 
-      if (idleTimeoutRef.current) clearTimeout(idleTimeoutRef.current);
-      idleTimeoutRef.current = setTimeout(async () => {
-        try {
-          console.log('⏱️ Idle timeout - quitting');
-          recognitionRef.current?.cancel?.();
-          setIsListening(false);
-          stopCamera();
-          onQuit(answers);
-        } catch (e) {
-          console.error('Timeout error:', e);
-        }
-      }, 10000);
-
     } catch (error) {
       console.error('❌ startListeningHandler error:', error.message);
       setIsListening(false);
@@ -300,6 +289,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
                          cleanAnswer.length < 5;
 
       if (isNoAnswer) {
+        stopSpeaking(); // Stop any ongoing speech
         setLoading(false);
         setIsAISpeaking(true);
         await speakCasualFeedback(getNoAnswerFeedback());
@@ -337,10 +327,12 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
               
               if (followUpResponse.type === 'rephrase') {
                 console.log('🔄 Rephrasing...');
+                stopSpeaking(); // Stop any ongoing speech first
+                await new Promise(r => setTimeout(r, 300));
                 setCurrentQuestionText(followUpResponse.text);
                 await speakCasualFeedback(getNoAnswerFeedback());
-                await new Promise(r => setTimeout(r, 500));
-               await speakQuestion(followUpResponse.text);
+                await new Promise(r => setTimeout(r, 800));
+                await speakQuestion(followUpResponse.text);
                 setIsAISpeaking(false);
                 setLiveTranscript('');
                 await new Promise(r => setTimeout(r, 2000));
@@ -348,9 +340,11 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
                 return;
               } else if (followUpResponse.type === 'followup') {
                 console.log('📝 Following up...');
+                stopSpeaking(); // Stop any ongoing speech first
+                await new Promise(r => setTimeout(r, 300));
                 setCurrentQuestionText(followUpResponse.text);
                 await speakCasualFeedback(getInitialFeedback(cleanAnswer));
-                await new Promise(r => setTimeout(r, 500));
+                await new Promise(r => setTimeout(r, 800));
                 await speakQuestion(followUpResponse.text);
                 setIsAISpeaking(false);
                 setLiveTranscript('');
@@ -361,6 +355,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
             }
           }
 
+          stopSpeaking(); // Stop any ongoing speech
           setIsAISpeaking(true);
           await speakCasualFeedback(getInitialFeedback(cleanAnswer));
           
@@ -368,6 +363,8 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
             await new Promise(r => setTimeout(r, 500));
             await speakCasualFeedback(getTransitionMessage(currentQ, questions.length));
             setIsAISpeaking(false);
+            setLiveTranscript('');
+            setFinalAnswer('');
             await new Promise(r => setTimeout(r, 1500));
             setCurrentQ(c => c + 1);
           } else {
@@ -378,7 +375,6 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
             stopCamera();
             onFinish(newAnswers, cleanAnswer);
           }
-          setLiveTranscript('');
         } catch (followUpError) {
           console.error('❌ Follow-up error:', followUpError.message);
           setIsAISpeaking(false);

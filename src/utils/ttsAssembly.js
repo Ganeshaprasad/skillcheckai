@@ -17,28 +17,43 @@ export const speakQuestion = async (text) => {
           return null;
         }
         
-        // Priority: Female Google voice
+        // Priority 1: Indian English Female voice (Google, Microsoft, or any)
         let selectedVoice = voices.find(v => 
-          v.name.includes('Google') && v.name.toLowerCase().includes('female')
+          (v.lang === 'en-IN' || v.lang.startsWith('en-IN')) &&
+          v.name.toLowerCase().includes('female')
         );
         
-        // Second: Any female voice
+        // Priority 2: Indian English voice (any)
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => 
+            v.lang === 'en-IN' || v.lang.startsWith('en-IN')
+          );
+        }
+        
+        // Priority 3: Female Google voice (US/UK English)
+        if (!selectedVoice) {
+          selectedVoice = voices.find(v => 
+            v.name.includes('Google') && v.name.toLowerCase().includes('female')
+          );
+        }
+        
+        // Priority 4: Any explicit female voice
         if (!selectedVoice) {
           selectedVoice = voices.find(v => 
             v.name.toLowerCase().includes('female') && v.lang.startsWith('en')
           );
         }
         
-        // Third: Female voices without male in name
+        // Priority 5: Female voices without male in name
         if (!selectedVoice) {
           selectedVoice = voices.find(v => 
             !v.name.toLowerCase().includes('male') && 
             v.lang.startsWith('en') &&
-            !v.name.toLowerCase().includes('samantha') // Skip bots with ambiguous names
+            !v.name.toLowerCase().includes('samantha')
           );
         }
         
-        // Last resort: Use voices[1] or [0] if available (usually different from default)
+        // Last resort: Use voices[1] or [0] if available
         if (!selectedVoice && voices.length > 1) {
           selectedVoice = voices[1];
         }

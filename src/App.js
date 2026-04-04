@@ -35,8 +35,25 @@ function App() {
   const handleFinish = async (answers, lastAnswer) => {
     setLoading(true);
     console.log('📊 Generating feedback...');
+    console.log('📊 Received answers count:', answers.length);
+    console.log('📊 Answers received:', answers);
+    console.log('📊 Total questions in interview:', interviewData.questions.length);
     
-    const allAnswers = [...answers, { q: answers.length, ans: lastAnswer }];
+    // Use all collected answers - they include main + follow-up/rephrase answers
+    let allAnswers = answers && answers.length > 0 ? answers : [];
+    
+    // Only add lastAnswer if it's new and not already tracked
+    if (lastAnswer && lastAnswer.trim() && allAnswers.length > 0) {
+      const lastStoredAns = allAnswers[allAnswers.length - 1]?.ans || '';
+      if (lastAnswer.trim() !== lastStoredAns.trim()) {
+        console.log('⚠️ Adding final answer that wasn\'t tracked');
+        allAnswers = [...allAnswers, { q: allAnswers.length, ans: lastAnswer }];
+      }
+    }
+    
+    console.log(`✅ Total answers for feedback: ${allAnswers.length}`);
+    console.log('✅ All answers:', allAnswers);
+    
     setAnswersData(allAnswers);
     const fb = await getFeedback(interviewData.questions, allAnswers, interviewData.topic);
     setFeedback(fb);
@@ -53,28 +70,70 @@ function App() {
   };
 
   const parseFeedback = (feedbackText) => {
-    const lines = feedbackText.split('\n');
+    const lines = feedbackText.split('\n').map(l => l.trim()).filter(l => l);
     const items = [];
     let currentItem = null;
+    let feedbackLines = [];
 
-    lines.forEach(line => {
-      const qMatch = line.match(/^Q(\d+): (.+)/);
-      const scoreMatch = line.match(/^Score: (\d+)\/10/);
-      const feedbackMatch = line.match(/^Feedback: (.+)/);
-
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      
+      // Match Q# format (Q1:, Q2:, etc.)
+      const qMatch = line.match(/^Q(\d+):\s*(.+)/i);
       if (qMatch) {
-        if (currentItem) items.push(currentItem);
-        currentItem = { question: qMatch[2], score: null, feedback: '' };
-      } else if (scoreMatch && currentItem) {
-        currentItem.score = scoreMatch[1];
-      } else if (feedbackMatch && currentItem) {
-        currentItem.feedback = feedbackMatch[1];
-      } else if (currentItem && line.trim()) {
-        currentItem.feedback += ' ' + line.trim();
+        // Save previous item if exists
+        if (currentItem) {
+          currentItem.feedback = feedbackLines.join(' ').trim();
+          items.push(currentItem);
+          feedbackLines = [];
+        }
+        
+        const qNum = parseInt(qMatch[1]) - 1;
+        currentItem = {
+          questionNum: qNum,
+          question: qMatch[2],
+          score: null,
+          feedback: ''
+        };
+        continue;
       }
-    });
 
-    if (currentItem) items.push(currentItem);
+      // Match Score: format
+      const scoreMatch = line.match(/^Score:\s*(\d+)\s*\/\s*10/i);
+      if (scoreMatch && currentItem) {
+        currentItem.score = scoreMatch[1];
+        continue;
+      }
+
+      // Match Feedback: format
+      const feedbackMatch = line.match(/^(?:Feedback|💡):\s*(.+)/i);
+      if (feedbackMatch && currentItem) {
+        feedbackLines.push(feedbackMatch[1]);
+        continue;
+      }
+
+      // Any other line that belongs to feedback
+      if (currentItem && line && !line.includes('AVERAGE SCORE') && !line.includes('---')) {
+        feedbackLines.push(line);
+      }
+    }
+
+    // Don't forget the last item
+    if (currentItem) {
+      currentItem.feedback = feedbackLines.join(' ').trim();
+      items.push(currentItem);
+    }
+
+    // If nothing was parsed, try to create items from answers data
+    if (items.length === 0 && answersData && answersData.length > 0) {
+      return answersData.map((ans, idx) => ({
+        questionNum: idx,
+        question: ans.question || `Question ${idx + 1}`,
+        score: '0',
+        feedback: '(No feedback generated)'
+      }));
+    }
+
     return items;
   };
 
@@ -130,58 +189,68 @@ function App() {
             🎉 Interview Complete!
           </h1>
 
-          {parseFeedback(feedback).map((item, idx) => (
-            <div key={idx} style={{
-              background: '#2d2d2d',
-              border: '2px solid #0078d4',
-              borderRadius: '15px',
-              padding: '25px',
-              marginBottom: '25px',
-              boxShadow: '0 4px 15px rgba(0, 120, 212, 0.2)'
-            }}>
-              <div style={{
-                fontSize: '16px',
-                color: '#00BCD4',
-                fontWeight: 'bold',
-                marginBottom: '10px'
+          {parseFeedback(feedback).map((item, idx) => {
+            const answerData = answersData && answersData[idx];
+            const questionText = item.question || (answerData && answerData.question) || `Question ${idx + 1}`;
+            const answerText = answerData && answerData.ans ? answerData.ans : '(No answer)';
+            const score = item.score || '0';
+            const feedbackText = item.feedback || '(No feedback available)';
+            
+            return (
+              <div key={idx} style={{
+                background: '#2d2d2d',
+                border: '2px solid #0078d4',
+                borderRadius: '15px',
+                padding: '25px',
+                marginBottom: '25px',
+                boxShadow: '0 4px 15px rgba(0, 120, 212, 0.2)'
               }}>
-                ❓ Q{idx + 1}: {item.question}
-              </div>
+                <div style={{
+                  fontSize: '16px',
+                  color: '#00BCD4',
+                  fontWeight: 'bold',
+                  marginBottom: '15px'
+                }}>
+                  ❓ Q{idx + 1}: {questionText}
+                </div>
 
-              <div style={{
-                fontSize: '15px',
-                color: '#81C784',
-                marginBottom: '15px',
-                padding: '10px',
-                background: 'rgba(129, 199, 132, 0.1)',
-                borderRadius: '8px',
-                fontStyle: 'italic'
-              }}>
-                💬 Your Answer: {answersData && answersData[idx]?.ans ? answersData[idx].ans : '(No answer)'}
-              </div>
+                <div style={{
+                  fontSize: '15px',
+                  color: '#81C784',
+                  marginBottom: '15px',
+                  padding: '15px',
+                  background: 'rgba(129, 199, 132, 0.1)',
+                  borderRadius: '8px',
+                  fontStyle: 'italic',
+                  maxHeight: '150px',
+                  overflowY: 'auto'
+                }}>
+                  💬 <strong>Your Answer:</strong> {answerText}
+                </div>
 
-              <div style={{
-                fontSize: '18px',
-                color: '#FFD700',
-                fontWeight: 'bold',
-                marginBottom: '10px'
-              }}>
-                {getStarRating(item.score)} {item.score}/10
-              </div>
+                <div style={{
+                  fontSize: '18px',
+                  color: '#FFD700',
+                  fontWeight: 'bold',
+                  marginBottom: '15px'
+                }}>
+                  {getStarRating(score)} Score: {score}/10
+                </div>
 
-              <div style={{
-                fontSize: '14px',
-                color: '#E0E0E0',
-                lineHeight: '1.6',
-                padding: '12px',
-                background: 'rgba(255, 255, 255, 0.05)',
-                borderRadius: '8px',
-                borderLeft: '3px solid #FFC107'
-              }}>
-                💡 {item.feedback}
+                <div style={{
+                  fontSize: '14px',
+                  color: '#E0E0E0',
+                  lineHeight: '1.6',
+                  padding: '15px',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  borderRadius: '8px',
+                  borderLeft: '3px solid #FFC107'
+                }}>
+                  <strong>💡 Feedback:</strong> {feedbackText}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           {feedback.includes('AVERAGE SCORE') && (
             <div style={{

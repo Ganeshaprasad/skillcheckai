@@ -22,11 +22,35 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
   const [followUpAskedForQ, setFollowUpAskedForQ] = useState(false);
   const [currentQuestionText, setCurrentQuestionText] = useState('');
   const [hasStartedAsking, setHasStartedAsking] = useState(false);
+  const [lastAskedQIndex, setLastAskedQIndex] = useState(-1);
+  const [isTimeUp, setIsTimeUp] = useState(false);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const recognitionRef = useRef(null);
   const idleTimeoutRef = useRef(null);
+  const timeUpHandledRef = useRef(false);
+  const answersRef = useRef([]);  // Use ref for immediate answer tracking
+
+  const handleTimeUp = async () => {
+    if (timeUpHandledRef.current) {
+      console.log('⏰ Time up already handled');
+      return;
+    }
+    timeUpHandledRef.current = true;
+    
+    console.log('⏰ TIME UP! Waiting for user to submit their answer...');
+    setIsTimeUp(true);
+    
+    // If AI is still speaking, let it finish first
+    if (isAISpeaking) {
+      console.log('⏸️ AI is speaking, waiting to finish...');
+      await new Promise(r => setTimeout(r, 2000));
+    }
+    
+    // Stop asking new questions - user can only submit current answer now
+    setIsAISpeaking(false);
+  };
 
   useEffect(() => {
     // Setup camera immediately - don't wait
@@ -97,12 +121,19 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
 
   useEffect(() => {
     const askQuestion = async () => {
+      // Prevent asking the same question twice (race condition fix)
+      if (lastAskedQIndex === currentQ) {
+        console.log(`⚠️ Q${currentQ + 1} already asked, skipping`);
+        return;
+      }
+      
       // Only start asking after delay period
       if (!hasStartedAsking) return;
       
       try {
         console.log(`\n🎯 Q${currentQ + 1}: ${questions[currentQ]}`);
         setCurrentQuestionText(questions[currentQ]);
+        setLastAskedQIndex(currentQ);  // Mark this question as asked
         setLiveTranscript('');
         setFinalAnswer('');
         setLoading(false);
@@ -169,23 +200,6 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
     const m = Math.floor(s / 60);
     const sec = s % 60;
     return `${m}:${sec.toString().padStart(2, '0')}`;
-  };
-
-  const handleTimeUp = async () => {
-    if (recognitionRef.current && recognitionRef.current.stop) {
-      try {
-        await recognitionRef.current.stop();
-      } catch (e) {
-        console.log('Recording stopped');
-      }
-    }
-    setIsListening(false);
-    setIsAISpeaking(true);
-    await speakCasualFeedback(getCompletionMessage());
-    setIsAISpeaking(false);
-    await new Promise(r => setTimeout(r, 1000));
-    stopCamera();
-    onFinish(answers, finalAnswer || liveTranscript);
   };
 
   const startListeningHandler = async () => {
@@ -280,8 +294,14 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
       }
 
       const cleanAnswer = answer.trim();
-      const newAnswers = [...answers, { q: currentQ, question: currentQuestionText, ans: cleanAnswer }];
+      // CRITICAL: Always spread from ref (answersRef.current) NOT from state (answers)
+      // State updates are async and can be stale, causing lost answers during follow-ups
+      const newAnswers = [...answersRef.current, { q: currentQ, question: currentQuestionText, ans: cleanAnswer }];
       setAnswers(newAnswers);
+      
+      // IMPORTANT: Use ref to track answers immediately (not async state)
+      answersRef.current = newAnswers;
+      console.log(`✅ Tracked answer ${answersRef.current.length}: Q${currentQ + 1} = "${cleanAnswer.substring(0, 50)}..."`)
 
       const isNoAnswer = cleanAnswer.toLowerCase().includes('dont know') || 
                          cleanAnswer.toLowerCase().includes("don't know") ||
@@ -295,7 +315,14 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
         await speakCasualFeedback(getNoAnswerFeedback());
         setIsAISpeaking(false);
 
-        if (currentQ < questions.length - 1 && timeLeft > 5) {
+        // If time is up, finish after this answer - don't move to next question
+        if (isTimeUp || currentQ >= questions.length - 1 || timeLeft <= 5) {
+          await speakCasualFeedback(getCompletionMessage());
+          setIsAISpeaking(false);
+          await new Promise(r => setTimeout(r, 1000));
+          stopCamera();
+          onFinish(answersRef.current, cleanAnswer);
+        } else if (currentQ < questions.length - 1) {
           await new Promise(r => setTimeout(r, 1000));
           setIsAISpeaking(true);
           await speakCasualFeedback(getTransitionMessage(currentQ, questions.length));
@@ -310,14 +337,15 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           setIsAISpeaking(false);
           await new Promise(r => setTimeout(r, 1000));
           stopCamera();
-          onFinish(newAnswers, cleanAnswer);
+          onFinish(answersRef.current, cleanAnswer);
         }
       } else {
         // Good answer - try to get follow-up (but only 1 per question)
+        // But skip follow-up if time is up
         setLoading(false);
         
         try {
-          if (!followUpAskedForQ) {
+          if (!followUpAskedForQ && !isTimeUp) {
             console.log('🔍 Getting follow-up...');
             const followUpResponse = await getFollowUpQuestion(topic, questions[currentQ], cleanAnswer);
 
@@ -359,7 +387,15 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           setIsAISpeaking(true);
           await speakCasualFeedback(getInitialFeedback(cleanAnswer));
           
-          if (currentQ < questions.length - 1 && timeLeft > 5) {
+          // If time is up, finish after this answer - don't move to next question
+          if (isTimeUp || currentQ >= questions.length - 1) {
+            await new Promise(r => setTimeout(r, 500));
+            await speakCasualFeedback(getCompletionMessage());
+            setIsAISpeaking(false);
+            await new Promise(r => setTimeout(r, 1000));
+            stopCamera();
+            onFinish(answersRef.current, cleanAnswer);
+          } else if (currentQ < questions.length - 1) {
             await new Promise(r => setTimeout(r, 500));
             await speakCasualFeedback(getTransitionMessage(currentQ, questions.length));
             setIsAISpeaking(false);
@@ -373,7 +409,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
             setIsAISpeaking(false);
             await new Promise(r => setTimeout(r, 1000));
             stopCamera();
-            onFinish(newAnswers, cleanAnswer);
+            onFinish(answersRef.current, cleanAnswer);
           }
         } catch (followUpError) {
           console.error('❌ Follow-up error:', followUpError.message);
@@ -399,7 +435,8 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
 
   const confirmQuit = async () => {
     stopCamera();
-    onQuit(answers);  // Pass answers count for feedback
+    console.log('📊 Quit with answers:', answersRef.current);
+    onFinish(answersRef.current, '');  // Pass collected answers, not state
   };
 
   const cancelQuit = () => {
@@ -484,10 +521,14 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
       }}>
         <div style={{
           position: 'absolute', top: 20, left: 20,
-          fontSize: '24px', fontWeight: 'bold', background: 'rgba(0,0,0,0.7)',
-          padding: '10px 20px', borderRadius: '10px'
+          fontSize: '24px', fontWeight: 'bold', 
+          background: isTimeUp ? 'rgba(220, 53, 69, 0.9)' : 'rgba(0,0,0,0.7)',
+          padding: '10px 20px', borderRadius: '10px',
+          color: isTimeUp ? '#fff' : 'inherit',
+          border: isTimeUp ? '2px solid #ff6b6b' : 'none',
+          animation: isTimeUp ? 'pulse 1s infinite' : 'none'
         }}>
-          ⏱️ {formatTime(timeLeft)}
+          {isTimeUp ? '⏰ TIME UP - SUBMIT TO FINISH' : `⏱️ ${formatTime(timeLeft)}`}
         </div>
 
         {/* CAMERA - 400px */}

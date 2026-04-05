@@ -111,24 +111,65 @@ const questionBanks = {
   }
 };
 
-export const fetchQuestions = async (topic, duration) => {
-  const numQuestions = duration === 10 ? 4 : 6;
-  const bank = questionBanks[topic];
+export const transcribeAudio = async (audioBlob) => {
+  const apiKey = process.env.REACT_APP_OPENAI_KEY;
+  if (!apiKey) {
+    return { text: '', success: false, error: 'No API key' };
+  }
 
+  console.log('🔄 Whisper upload — size:', audioBlob.size, 'bytes');
+
+  if (audioBlob.size < 500) {
+    return { text: '', success: false, error: 'Audio too short' };
+  }
+
+  try {
+    const formData = new FormData();
+    // Use relative URL — goes through CRA proxy to api.openai.com, no CORS
+    formData.append('file', new Blob([audioBlob], { type: 'audio/webm' }), 'recording.webm');
+    formData.append('model', 'whisper-1');
+    formData.append('language', 'en');
+    formData.append('response_format', 'json');
+
+    const startTime = Date.now();
+    const response = await fetch('/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      body: formData
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    if (!response.ok) {
+      let errMsg = `HTTP ${response.status}`;
+      try { const b = await response.json(); errMsg = b?.error?.message || errMsg; } catch (e) {}
+      console.error('❌ Whisper error:', errMsg);
+      return { text: '', success: false, error: errMsg };
+    }
+
+    const data = await response.json();
+    console.log(`✅ Whisper done (${elapsed}s):`, data.text);
+    return { text: data.text || '', success: true };
+
+  } catch (err) {
+    console.error('❌ Whisper fetch failed:', err.message);
+    return { text: '', success: false, error: err.message };
+  }
+};
+
+export const fetchQuestions = async (topic, numQuestions) => {
+  const bank = questionBanks[topic];
   if (!bank) return ['Tell me about your testing experience.'];
 
-  const questions = [];
-  const easyCount = Math.ceil(numQuestions * 0.3);
-  const mediumCount = Math.ceil(numQuestions * 0.4);
-  const hardCount = numQuestions - easyCount - mediumCount;
-
+  // Distribute: all easy first, then medium, then hard (shuffled within each)
   const shuffleArray = (arr) => [...arr].sort(() => Math.random() - 0.5);
+  const questions = [
+    ...shuffleArray(bank.easy),
+    ...shuffleArray(bank.medium),
+    ...shuffleArray(bank.hard)
+  ];
 
-  questions.push(...shuffleArray(bank.easy).slice(0, easyCount));
-  questions.push(...shuffleArray(bank.medium).slice(0, mediumCount));
-  questions.push(...shuffleArray(bank.hard).slice(0, hardCount));
-
-  return questions;
+  return questions.slice(0, numQuestions);
 };
 
 export const getFollowUpQuestion = async (topic, currentQuestion, candidateAnswer) => {
@@ -218,14 +259,19 @@ export const getFeedback = async (questions, answers, topic) => {
   
   const safeAnswers = answers && answers.length ? answers : questions.map(() => ({ ans: 'No answer given' }));
   
-  // Get actual questions asked (which may include rephrased or follow-up questions)
-  const actualQuestions = safeAnswers.map((a) => a.question || questions[a.q] || 'Question not found');
+  // Log what we're sending to GPT
+  safeAnswers.forEach((a, i) => {
+    console.log(`  GPT input ${i + 1}: Q="${(questions[i] || '').substring(0, 40)}" A="${(a.ans || 'EMPTY').substring(0, 60)}"`);
+  });
+
+  // Get actual questions asked
+  const actualQuestions = questions;
 
   try {
     const prompt = `You are a VERY STRICT ${topic} technical interviewer rating candidate's answers. Be HARSH - do NOT give high marks easily.
 
 STRICT SCORING RULES (NON-NEGOTIABLE):
-- "don't know", blank, or "no idea" = 0/10 (ALWAYS)
+- "don't know", "no idea", blank, empty, "(No answer)", or any variant = SCORE 0/10 (ALWAYS, NO EXCEPTIONS)
 - One word or 1-5 words only = 1-2/10 (too brief, no explanation)
 - 6-15 words, vague/incomplete = 2-3/10 (missing key details)
 - 16-30 words, missing concepts = 4-5/10 (partial answer, needs more)
@@ -244,41 +290,37 @@ MAXIMUM RULE:
 - Most answers should score 0-6
 - Save 8-10 only for exceptional answers showing REAL expertise
 
-FOR EACH QUESTION, output EXACTLY:
+FOR EACH QUESTION, output EXACTLY this format (NO question numbers like Q1, Q2):
 
-Q1: What is Selenium?
+Question: What is Selenium?
 Score: 0/10
-Feedback: Blank answer. Study what Selenium is, its architecture, and why it's used in automation testing.
+Feedback: No answer provided. Study what Selenium is, its architecture, and why it's used in automation testing.
 
-Q2: Difference between Selenium 3 and 4?
+Question: Difference between Selenium 3 and 4?
 Score: 5/10
-Feedback: Answer shows struggle with excessive filler sounds (mmm, hhh). Study the topic more thoroughly. When ready, explain differences in clear, complete sentences.
-
-Q3: How do you handle waits?
-Score: 8/10
-Feedback: Excellent! You clearly explained implicit, explicit, and fluent waits with practical examples showing when to use each. Your knowledge is strong - focus on edge cases and custom wait conditions for mastery.
+Feedback: Answer shows struggle with excessive filler sounds. Study the topic more thoroughly.
 
 ---
 
 NOW RATE THESE STRICTLY:
 
-${actualQuestions.map((q, i) => `Q${i + 1}: ${q}`).join('\n\n')}
+${actualQuestions.map((q) => `Question: ${q}`).join('\n\n')}
 
 CANDIDATE ANSWERS:
 ${safeAnswers.map((a, i) => {
-  const ans = a.ans && a.ans.trim() ? a.ans.trim() : 'No answer / Blank';
+  const ans = a.ans && a.ans.trim() ? a.ans.trim() : 'No answer given';
   const hasFillerSounds = hasTooMuchFillerSounds(ans);
-  return `Q${i + 1}: ${ans}${hasFillerSounds ? ' [NOTE: Contains excessive filler sounds]' : ''}`;
+  return `Answer for "${actualQuestions[i]}": ${ans}${hasFillerSounds ? ' [NOTE: Contains excessive filler sounds]' : ''}`;
 }).join('\n\n')}
 
 IMPORTANT: 
 - Be STRICT
+- Empty answer or "don't know" or "no idea" or "I don't know" = ALWAYS 0/10, no exceptions
 - Max score 7 for decent answers
-- Only give 8+ for EXCEPTIONAL, clearly explained answers with examples
+- Only give 8+ for EXCEPTIONAL answers with examples
 - If answer has excessive filler sounds, max score is 5
-- Output scores between lines, no extra text
-- After all Q ratings, add this exact line:
-AVERAGE SCORE: X.X/10
+- Do NOT use Q1, Q2 numbering. Use "Question:" prefix only
+- After all ratings, add: AVERAGE SCORE: X.X/10
 
 PROVIDE FEEDBACK NOW:`;
 
@@ -355,7 +397,7 @@ function generateStrictDefaultFeedback(questions, answers) {
     }
     
     totalScore += score;
-    feedback += `Q${i + 1}: ${q}\nScore: ${score}/10\nFeedback: `;
+    feedback += `Question: ${q}\nScore: ${score}/10\nFeedback: `;
     
     if (score === 0) {
       feedback += `No answer provided. You must study this concept thoroughly.\n\n`;

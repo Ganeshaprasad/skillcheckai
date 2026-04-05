@@ -15,8 +15,9 @@ function App() {
     console.log('🚀 Starting with:', data);
     
     try {
-      const numQuestions = data.duration === 10 ? 4 : 6;
-      console.log(`📝 Fetching ${numQuestions} questions...`);
+      // Fetch many questions — interview runs until time expires
+      const numQuestions = 15;
+      console.log(`📝 Fetching ${numQuestions} questions for ${data.duration} min...`);
       const questions = await fetchQuestions(data.topic, numQuestions);
       console.log('✅ Questions:', questions);
       
@@ -39,23 +40,19 @@ function App() {
     console.log('📊 Answers received:', answers);
     console.log('📊 Total questions in interview:', interviewData.questions.length);
     
-    // Use all collected answers - they include main + follow-up/rephrase answers
+    // Use all collected answers
     let allAnswers = answers && answers.length > 0 ? answers : [];
     
-    // Only add lastAnswer if it's new and not already tracked
-    if (lastAnswer && lastAnswer.trim() && allAnswers.length > 0) {
-      const lastStoredAns = allAnswers[allAnswers.length - 1]?.ans || '';
-      if (lastAnswer.trim() !== lastStoredAns.trim()) {
-        console.log('⚠️ Adding final answer that wasn\'t tracked');
-        allAnswers = [...allAnswers, { q: allAnswers.length, ans: lastAnswer }];
-      }
-    }
-    
     console.log(`✅ Total answers for feedback: ${allAnswers.length}`);
-    console.log('✅ All answers:', allAnswers);
+    allAnswers.forEach((a, i) => {
+      console.log(`  Answer ${i + 1}: Q="${(a.question || '').substring(0, 40)}" A="${(a.ans || '').substring(0, 60)}"`);
+    });
     
     setAnswersData(allAnswers);
-    const fb = await getFeedback(interviewData.questions, allAnswers, interviewData.topic);
+    
+    // Only send the questions that were actually asked (based on answers)
+    const askedQuestions = allAnswers.map(a => a.question || 'Question');
+    const fb = await getFeedback(askedQuestions, allAnswers, interviewData.topic);
     setFeedback(fb);
     setPage('feedback');
     setLoading(false);
@@ -78,8 +75,8 @@ function App() {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       
-      // Match Q# format (Q1:, Q2:, etc.)
-      const qMatch = line.match(/^Q(\d+):\s*(.+)/i);
+      // Match "Question:" format or "Q#:" format
+      const qMatch = line.match(/^(?:Question|Q\d+):\s*(.+)/i);
       if (qMatch) {
         // Save previous item if exists
         if (currentItem) {
@@ -88,10 +85,9 @@ function App() {
           feedbackLines = [];
         }
         
-        const qNum = parseInt(qMatch[1]) - 1;
         currentItem = {
-          questionNum: qNum,
-          question: qMatch[2],
+          questionNum: items.length,
+          question: qMatch[1],
           score: null,
           feedback: ''
         };
@@ -190,9 +186,12 @@ function App() {
           </h1>
 
           {parseFeedback(feedback).map((item, idx) => {
+            // Use answersData as primary source for question and answer
             const answerData = answersData && answersData[idx];
-            const questionText = item.question || (answerData && answerData.question) || `Question ${idx + 1}`;
-            const answerText = answerData && answerData.ans ? answerData.ans : '(No answer)';
+            const questionText = (answerData && answerData.question) || item.question || 'Question';
+            const answerText = (answerData && answerData.ans && answerData.ans.trim().length > 0) 
+              ? answerData.ans 
+              : '(No answer)';
             const score = item.score || '0';
             const feedbackText = item.feedback || '(No feedback available)';
             
@@ -211,7 +210,7 @@ function App() {
                   fontWeight: 'bold',
                   marginBottom: '15px'
                 }}>
-                  ❓ Q{idx + 1}: {questionText}
+                  ❓ {questionText}
                 </div>
 
                 <div style={{

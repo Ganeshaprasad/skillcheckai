@@ -1,228 +1,61 @@
-// Whisper API Integration for High-Accuracy Speech-to-Text
-// Cost: $0.006 per minute of audio
-
-// Record audio from existing stream (don't request new one)
-export const recordAudioFromStream = async (existingStream) => {
-  try {
-    // Use the audio tracks from existing stream
-    const audioTracks = existingStream.getAudioTracks();
-    if (audioTracks.length === 0) {
-      throw new Error('No audio tracks available in stream');
-    }
-
-    // Create new stream with only audio tracks (don't stop them)
-    const audioStream = new MediaStream(audioTracks);
-    
-    const mediaRecorder = new MediaRecorder(audioStream, {
-      mimeType: 'audio/webm;codecs=opus'
-    });
-
-    const chunks = [];
-
-    mediaRecorder.ondataavailable = (e) => {
-      chunks.push(e.data);
-    };
-
-    mediaRecorder.start();
-    console.log('🎤 Recording started from existing stream');
-
-    return {
-      stop: async () => {
-        return new Promise((resolve) => {
-          mediaRecorder.onstop = () => {
-            const audioBlob = new Blob(chunks, { type: 'audio/webm' });
-            console.log('⏹️ Recording stopped');
-            resolve(audioBlob);
-          };
-          mediaRecorder.stop();
-        });
-      },
-      cancel: () => {
-        mediaRecorder.stop();
-        console.log('❌ Recording cancelled');
-      }
-    };
-  } catch (error) {
-    console.error('❌ Audio recording error:', error);
-    throw new Error('Could not access audio. Please check permissions.');
-  }
-};
-
-// Legacy function for backward compatibility
-export const recordAudio = async () => {
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: {
-      echoCancellation: true,
-      noiseSuppression: true,
-      autoGainControl: true,
-      sampleRate: 44100  // High quality audio
-    }});
-
-    const mediaRecorder = new MediaRecorder(stream, {
-      mimeType: 'audio/webm;codecs=opus'
-    });
-
-    const chunks = [];
-
-    mediaRecorder.ondataavailable = (e) => {
-      chunks.push(e.data);
-    };
-
-    mediaRecorder.start();
-    console.log('🎤 Recording started');
-
-    return {
-      stop: async () => {
-        return new Promise((resolve) => {
-          mediaRecorder.onstop = () => {
-            const audioBlob = new Blob(chunks, { type: 'audio/webm' });
-            // Stop all tracks to free resources
-            stream.getTracks().forEach(track => track.stop());
-            console.log('⏹️ Recording stopped');
-            resolve(audioBlob);
-          };
-          mediaRecorder.stop();
-        });
-      },
-      cancel: () => {
-        mediaRecorder.stop();
-        stream.getTracks().forEach(track => track.stop());
-        console.log('❌ Recording cancelled');
-      }
-    };
-  } catch (error) {
-    console.error('❌ Microphone access error:', error);
-    throw new Error('Could not access microphone. Please check permissions.');
-  }
-};
+// Whisper API — raw fetch (most reliable for browser multipart uploads)
 
 export const transcribeAudio = async (audioBlob) => {
+  const apiKey = process.env.REACT_APP_OPENAI_KEY;
+
+  if (!apiKey) {
+    console.error('❌ No OpenAI API key');
+    return { text: '', success: false, error: 'No API key' };
+  }
+
+  // Force simple audio/webm type — strip codec suffix that confuses some APIs
+  const cleanBlob = new Blob([audioBlob], { type: 'audio/webm' });
+  console.log('🔄 Whisper upload — size:', cleanBlob.size, 'bytes');
+
+  if (cleanBlob.size < 500) {
+    return { text: '', success: false, error: 'Audio too short' };
+  }
+
   try {
-    const apiKey = process.env.REACT_APP_OPENAI_KEY;
-    
-    if (!apiKey) {
-      throw new Error('OpenAI API key not found. Add REACT_APP_OPENAI_KEY to .env.local');
-    }
-
-    console.log('🔄 Sending audio to Whisper API...');
-    const startTime = Date.now();
-
     const formData = new FormData();
-    formData.append('file', audioBlob, 'audio.webm');
+    // Append as Blob with filename — DO NOT set Content-Type header manually
+    formData.append('file', cleanBlob, 'audio.webm');
     formData.append('model', 'whisper-1');
-    formData.append('language', 'en');  // English for high accuracy
-    formData.append('temperature', '0');  // More deterministic for technical terms
+    formData.append('language', 'en');
+    formData.append('response_format', 'json');
+
+    const startTime = Date.now();
 
     const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
       method: 'POST',
       headers: {
+        // Only Authorization — browser sets Content-Type with multipart boundary
         'Authorization': `Bearer ${apiKey}`
       },
       body: formData
     });
 
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
     if (!response.ok) {
-      const error = await response.json();
-      console.error('❌ API Error:', error);
-      throw new Error(error.error?.message || 'Transcription failed');
+      let errMsg = `HTTP ${response.status}`;
+      try {
+        const errBody = await response.json();
+        errMsg = errBody?.error?.message || errMsg;
+        console.error('❌ Whisper API error response:', errBody);
+      } catch (e) {
+        console.error('❌ Whisper HTTP error:', response.status, response.statusText);
+      }
+      return { text: '', success: false, error: errMsg };
     }
 
-    const result = await response.json();
-    const duration = (Date.now() - startTime) / 1000;
-    
-    console.log(`✅ Transcription complete (${duration.toFixed(1)}s):`);
-    console.log('📝 Text:', result.text);
-    console.log('📊 Confidence: Very High (Whisper AI)');
+    const data = await response.json();
+    console.log(`✅ Whisper done (${elapsed}s):`, data.text);
 
-    return {
-      text: result.text,
-      success: true
-    };
-  } catch (error) {
-    console.error('❌ Transcription Error:', error);
-    return {
-      text: '',
-      success: false,
-      error: error.message
-    };
+    return { text: data.text || '', success: true };
+  } catch (err) {
+    console.error('❌ Whisper fetch error:', err.name, err.message);
+    return { text: '', success: false, error: `${err.name}: ${err.message}` };
   }
 };
 
-// Live transcription with existing stream
-export const startLiveTranscription = async (onTranscriptUpdate, existingStream = null) => {
-  try {
-    let recordingSession;
-    
-    if (existingStream) {
-      // Use existing stream from camera (preferred)
-      recordingSession = await recordAudioFromStream(existingStream);
-      console.log('✅ Using existing camera stream for audio');
-    } else {
-      // Request new stream only if no existing one provided
-      recordingSession = await recordAudio();
-      console.log('✅ Requested new audio stream');
-    }
-    
-    // Signal that recording has started
-    onTranscriptUpdate('');
-
-    return {
-      stop: async () => {
-        try {
-          // Stop recording and get audio blob
-          const audioBlob = await recordingSession.stop();
-          
-          console.log('📊 Audio blob created, size:', audioBlob.size, 'bytes');
-          
-          if (audioBlob.size === 0) {
-            console.warn('⚠️ Audio blob is empty!');
-            return '';
-          }
-          
-          // Show processing status
-          onTranscriptUpdate('🔄 Processing...');
-          
-          // Transcribe the audio
-          const result = await transcribeAudio(audioBlob);
-          
-          // Update UI with final transcript
-          if (result.success) {
-            console.log('✅ Transcription successful:', result.text);
-            onTranscriptUpdate(result.text);
-            return result.text;
-          } else {
-            console.warn('⚠️ Transcription failed:', result.error);
-            // Return empty string on error instead of crashing
-            onTranscriptUpdate('');
-            return '';
-          }
-        } catch (error) {
-          console.error('❌ Error stopping recording:', error);
-          onTranscriptUpdate('');
-          return '';
-        }
-      },
-      cancel: () => {
-        try {
-          recordingSession.cancel();
-          console.log('❌ Recording cancelled');
-        } catch (e) {
-          console.log('Cancel already done');
-        }
-      }
-    };
-  } catch (error) {
-    console.error('❌ Error in startLiveTranscription:', error);
-    // Don't throw - return a dummy session that returns empty
-    return {
-      stop: async () => {
-        console.warn('⚠️ Recording session failed, returning empty');
-        onTranscriptUpdate('');
-        return '';
-      },
-      cancel: () => {
-        console.log('Cancel called on failed session');
-      }
-    };
-  }
-};

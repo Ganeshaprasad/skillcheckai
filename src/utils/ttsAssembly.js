@@ -8,6 +8,23 @@ export const speakQuestion = async (text) => {
       utterance.pitch = 1.5;  // Higher pitch for female voice
       utterance.volume = 1.0;
 
+      // CRITICAL: Safety timeout - Chrome bug causes onend to never fire on short texts
+      // Force-resolve after max(8s, text-length-based time) so we never get stuck
+      let resolved = false;
+      const resolveOnce = () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(safetyTimer);
+          resolve();
+        }
+      };
+      const estimatedMs = Math.max(3000, (text.length / 10) * 1000 + 2000);
+      const safetyTimer = setTimeout(() => {
+        console.warn('⚠️ TTS safety timeout - forcing resolve');
+        window.speechSynthesis.cancel();
+        resolveOnce();
+      }, estimatedMs);
+
       // Wait for voices to be loaded
       const loadVoices = () => {
         const voices = window.speechSynthesis.getVoices();
@@ -80,16 +97,19 @@ export const speakQuestion = async (text) => {
 
       utterance.onend = () => {
         console.log('✅ Speaking finished');
-        resolve();
+        resolveOnce();
       };
 
       utterance.onerror = (e) => {
         console.error('❌ TTS error:', e.error);
-        resolve();
+        resolveOnce();
       };
 
+      // Small delay after cancel to avoid Chrome bug where onend never fires
       window.speechSynthesis.cancel();
-      window.speechSynthesis.speak(utterance);
+      setTimeout(() => {
+        window.speechSynthesis.speak(utterance);
+      }, 100);
     } catch (error) {
       console.error('❌ Exception:', error);
       resolve();

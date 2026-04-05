@@ -14,7 +14,8 @@ const Home = ({ onStart }) => {
 
   const times = [
     { value: 1, label: '1 minute' },
-    { value: 2, label: '2 minutes' }
+    { value: 5, label: '5 minutes' },
+    { value: 10, label: '10 minutes' }
   ];
 
   const customSelectStyles = {
@@ -258,7 +259,6 @@ const Home = ({ onStart }) => {
             width: '100%', 
             padding: 'clamp(12px, 3vw, 14px)', 
             fontSize: 'clamp(14px, 3vw, 16px)', 
-            fontWeight: '600',
             background: topic && duration 
               ? 'linear-gradient(135deg, #0078d4 0%, #00d4ff 100%)' 
               : '#444',

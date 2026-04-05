@@ -1,110 +1,84 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { speakQuestion, stopSpeaking, speakCasualFeedback } from '../utils/ttsAssembly';
-import { getFollowUpQuestion } from '../utils/api';
-import { startLiveTranscription } from '../utils/whisper';
+import { getFollowUpQuestion, transcribeAudio } from '../utils/api';
 import {
   getInitialFeedback,
-  getNoAnswerFeedback,
-  getTransitionMessage,
   getCompletionMessage
 } from '../utils/feedbackMessages';
 
-const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
+const Interview = ({ topic, duration, questions, onFinish }) => {
   const [currentQ, setCurrentQ] = useState(0);
   const [timeLeft, setTimeLeft] = useState(duration * 60);
   const [isListening, setIsListening] = useState(false);
   const [liveTranscript, setLiveTranscript] = useState('');
-  const [finalAnswer, setFinalAnswer] = useState('');
-  const [answers, setAnswers] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isAISpeaking, setIsAISpeaking] = useState(false);
   const [showQuitConfirm, setShowQuitConfirm] = useState(false);
-  const [followUpAskedForQ, setFollowUpAskedForQ] = useState(false);
   const [currentQuestionText, setCurrentQuestionText] = useState('');
   const [hasStartedAsking, setHasStartedAsking] = useState(false);
-  const [lastAskedQIndex, setLastAskedQIndex] = useState(-1);
   const [isTimeUp, setIsTimeUp] = useState(false);
+  const [recordingTime, setRecordingTime] = useState(0);
+  const [audioLevel, setAudioLevel] = useState(0);
 
   const videoRef = useRef(null);
   const streamRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const idleTimeoutRef = useRef(null);
+  const audioStreamRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
   const timeUpHandledRef = useRef(false);
-  const answersRef = useRef([]);  // Use ref for immediate answer tracking
+  const isTimeUpRef = useRef(false);
+  const lastAskedQRef = useRef(-1);
+  const answersRef = useRef([]);
+  const isSubmittingRef = useRef(false);
+  const followUpAskedForQRef = useRef(-1);
+  const recordingTimerRef = useRef(null);
+  const audioContextRef = useRef(null);
+  const analyserRef = useRef(null);
+  const levelIntervalRef = useRef(null);
 
-  const handleTimeUp = async () => {
-    if (timeUpHandledRef.current) {
-      console.log('⏰ Time up already handled');
-      return;
-    }
-    timeUpHandledRef.current = true;
-    
-    console.log('⏰ TIME UP! Waiting for user to submit their answer...');
-    setIsTimeUp(true);
-    
-    // If AI is still speaking, let it finish first
-    if (isAISpeaking) {
-      console.log('⏸️ AI is speaking, waiting to finish...');
-      await new Promise(r => setTimeout(r, 2000));
-    }
-    
-    // Stop asking new questions - user can only submit current answer now
-    setIsAISpeaking(false);
-  };
-
+  // ========================
+  // CAMERA SETUP + TIMER
+  // ========================
   useEffect(() => {
-    // Setup camera immediately - don't wait
     const setupCamera = async () => {
       try {
-        console.log('📷 Setting up camera NOW...');
-        const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { 
-            width: { min: 640, ideal: 1280, max: 1920 },
-            height: { min: 480, ideal: 720, max: 1080 },
-            facingMode: 'user'
-          },
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true
-          }
+        // Video ONLY — mic is requested separately in startListening so there's no conflict
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
+          audio: false
         });
-        
-        console.log('✅ Stream ready:', {
-          video: stream.getVideoTracks().length,
-          audio: stream.getAudioTracks().length
-        });
-        
         streamRef.current = stream;
-        
-        // Attach to video element immediately
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           videoRef.current.onloadedmetadata = () => {
-            videoRef.current.play().catch(e => console.error('Play error:', e));
+            videoRef.current.play().catch(() => {});
           };
         }
       } catch (err) {
-        console.error('❌ Camera setup failed:', err.message);
-        alert('❌ Camera/Mic permission denied.\nPlease:\n1. Reload page\n2. Allow camera access\n3. Try again');
+        alert('Camera permission denied. Please reload and allow access.');
       }
     };
 
-    // Start camera setup immediately
     setupCamera();
 
-    // Start timer - delay first question by 3-4 seconds
+    // Warm-up mic permission check so browser grants it before first question
+    navigator.mediaDevices.getUserMedia({ audio: true })
+      .then(s => { s.getTracks().forEach(t => t.stop()); console.log('✅ Mic permission granted'); })
+      .catch(e => { alert('Microphone permission denied. Please reload and allow mic access.'); });
+
     const questionTimer = setTimeout(() => {
-      console.log('⏰ Time to ask first question');
       setHasStartedAsking(true);
     }, 3500);
 
-    // Timer for countdown
     const timerId = setInterval(() => {
       setTimeLeft(t => {
         if (t <= 1) {
           clearInterval(timerId);
-          handleTimeUp();
+          if (!timeUpHandledRef.current) {
+            timeUpHandledRef.current = true;
+            isTimeUpRef.current = true;
+            setIsTimeUp(true);
+          }
           return 0;
         }
         return t - 1;
@@ -114,86 +88,78 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
     return () => {
       clearTimeout(questionTimer);
       clearInterval(timerId);
-      stopCamera();
+      cleanupAll();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ========================
+  // ASK QUESTION
+  // ========================
+  const askQuestionFlow = useCallback(async (qIndex) => {
+    if (lastAskedQRef.current === qIndex) return;
+    if (qIndex >= questions.length) return;
+
+    console.log(`\n🎯 ASK Q${qIndex + 1}: ${questions[qIndex]}`);
+    lastAskedQRef.current = qIndex;
+
+    setLiveTranscript('');
+    setLoading(false);
+    setIsListening(false);
+    setCurrentQuestionText(questions[qIndex]);
+
+    setIsAISpeaking(true);
+    stopSpeaking();
+    try { await speakQuestion(questions[qIndex]); } catch (e) {}
+    setIsAISpeaking(false);
+
+    startListening();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questions]);
+
   useEffect(() => {
-    const askQuestion = async () => {
-      // Prevent asking the same question twice (race condition fix)
-      if (lastAskedQIndex === currentQ) {
-        console.log(`⚠️ Q${currentQ + 1} already asked, skipping`);
-        return;
-      }
-      
-      // Only start asking after delay period
-      if (!hasStartedAsking) return;
-      
-      try {
-        console.log(`\n🎯 Q${currentQ + 1}: ${questions[currentQ]}`);
-        setCurrentQuestionText(questions[currentQ]);
-        setLastAskedQIndex(currentQ);  // Mark this question as asked
-        setLiveTranscript('');
-        setFinalAnswer('');
-        setLoading(false);
-        setIsAISpeaking(true);
-        setIsListening(false);
-        setFollowUpAskedForQ(false);
-
-        // Stop any existing speech and recognition
-        stopSpeaking(); // Stop any ongoing speech
-        if (recognitionRef.current) {
-          try {
-            if (recognitionRef.current.cancel) recognitionRef.current.cancel();
-            recognitionRef.current = null;
-          } catch (e) {
-            console.log('Recognition cleanup');
-          }
-        }
-        
-        await new Promise(r => setTimeout(r, 500));
-        await speakQuestion(questions[currentQ]);
-        setIsAISpeaking(false);
-        
-        await new Promise(r => setTimeout(r, 2000));
-        await startListeningHandler();
-      } catch (error) {
-        console.error('❌ Question error:', error.message);
-        setIsAISpeaking(false);
-        // Continue to next question to prevent crash
-        setCurrentQ(c => c + 1);
-      }
-    };
-
-    if (questions[currentQ] && hasStartedAsking && currentQ < questions.length) {
-      askQuestion();
+    if (hasStartedAsking && currentQ < questions.length) {
+      askQuestionFlow(currentQ);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentQ, questions, hasStartedAsking, topic, onQuit, onFinish]);
+  }, [currentQ, hasStartedAsking]);
 
-  const stopCamera = () => {
-    if (recognitionRef.current) {
-      try {
-        // Handle both Whisper (has cancel method) and Speech Recognition API (has abort method)
-        if (recognitionRef.current.cancel) {
-          recognitionRef.current.cancel();
-        } else if (recognitionRef.current.abort) {
-          recognitionRef.current.abort();
-        }
-      } catch (e) {
-        console.log('Recording/Recognition stopped');
-      }
-      recognitionRef.current = null;
-    }
+  // ========================
+  // CLEANUP
+  // ========================
+  const cleanupAll = () => {
+    stopRecording();
     stopSpeaking();
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  };
+
+  const stopRecording = () => {
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
     }
+    if (levelIntervalRef.current) {
+      clearInterval(levelIntervalRef.current);
+      levelIntervalRef.current = null;
+    }
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try { mediaRecorderRef.current.stop(); } catch (e) {}
+    }
+    mediaRecorderRef.current = null;
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach(t => t.stop());
+      audioStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      try { audioContextRef.current.close(); } catch (e) {}
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+    setAudioLevel(0);
   };
 
   const formatTime = (s) => {
@@ -202,247 +168,249 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
     return `${m}:${sec.toString().padStart(2, '0')}`;
   };
 
-  const startListeningHandler = async () => {
-    try {
-      setIsListening(true);
-      setLiveTranscript('');
-      setFinalAnswer('');
-      console.log('🎤 Listening started');
+  // ========================
+  // START LISTENING — Separate audio stream + MediaRecorder for Whisper
+  // ========================
+  const startListening = async () => {
+    stopRecording();
+    setLiveTranscript('');
+    setRecordingTime(0);
+    setAudioLevel(0);
+    audioChunksRef.current = [];
 
-      if (!streamRef.current) {
-        console.error('❌ No stream available');
-        setIsListening(false);
-        alert('Camera not ready. Please try again.');
-        return;
-      }
-      
-      console.log('📊 Using stream with', streamRef.current.getTracks().length, 'tracks');
-      
-      let session;
+    try {
+      // Request a SEPARATE audio-only stream (not shared with camera)
+      const audioStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      audioStreamRef.current = audioStream;
+
+      // Set up audio level monitoring via AudioContext
       try {
-        session = await startLiveTranscription((transcript) => {
-          if (transcript && transcript.trim() && !transcript.includes('Listening')) {
-            setLiveTranscript(transcript);
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const source = ctx.createMediaStreamSource(audioStream);
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        audioContextRef.current = ctx;
+        analyserRef.current = analyser;
+
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+        levelIntervalRef.current = setInterval(() => {
+          if (analyserRef.current) {
+            analyserRef.current.getByteFrequencyData(dataArray);
+            const avg = dataArray.reduce((a, b) => a + b, 0) / dataArray.length;
+            setAudioLevel(Math.min(100, Math.round(avg * 2)));
           }
-        }, streamRef.current);
-      } catch (sessionError) {
-        console.error('❌ Session error:', sessionError.message);
-        setIsListening(false);
-        alert('Microphone error. Check permissions and try again.');
-        return;
+        }, 150);
+      } catch (e) {
+        console.warn('AudioContext not available for level monitoring');
       }
 
-      if (!session) {
-        console.error('❌ Session is null');
-        setIsListening(false);
-        return;
-      }
+      // Create MediaRecorder with MIME type fallback
+      const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+        ? 'audio/webm;codecs=opus'
+        : MediaRecorder.isTypeSupported('audio/webm')
+          ? 'audio/webm'
+          : '';
+      const options = mimeType ? { mimeType } : {};
+      const recorder = new MediaRecorder(audioStream, options);
 
-      recognitionRef.current = session;
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          audioChunksRef.current.push(e.data);
+        }
+      };
 
-    } catch (error) {
-      console.error('❌ startListeningHandler error:', error.message);
-      setIsListening(false);
-      alert('Error: ' + error.message);
+      recorder.onerror = (e) => {
+        console.error('MediaRecorder error:', e);
+        setLiveTranscript(`⚠️ Recording error: ${e.error?.message || 'Unknown'}`);
+      };
+
+      recorder.start(1000); // 1-second chunks
+      mediaRecorderRef.current = recorder;
+      setIsListening(true);
+
+      console.log(`🎤 Recording started — MIME: ${recorder.mimeType}, separate audio stream`);
+
+      // Start recording timer
+      recordingTimerRef.current = setInterval(() => {
+        setRecordingTime(t => t + 1);
+      }, 1000);
+
+    } catch (e) {
+      console.error('Failed to start recording:', e);
+      setLiveTranscript(`⚠️ Mic access failed: ${e.message}`);
     }
   };
 
+  // ========================
+  // SUBMIT ANSWER
+  // ========================
   const handleSubmitAnswer = async () => {
-    try {
-      console.log('📤 Submitting answer...');
-      
-      if (idleTimeoutRef.current) clearTimeout(idleTimeoutRef.current);
-      
-      if (!recognitionRef.current) {
-        console.warn('⚠️ No recording session');
-        setIsListening(false);
-        alert('Please speak first.');
-        return;
-      }
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
 
-      setIsListening(false);
-      setLoading(true);
+    // Stop listening immediately
+    setIsListening(false);
+    setLoading(true);
 
-      let answer = '';
-      
-      if (recognitionRef.current && recognitionRef.current.stop) {
-        try {
-          console.log('⏹️ Stopping Whisper...');
-          const whisperTranscript = await recognitionRef.current.stop();
-          
-          if (whisperTranscript && whisperTranscript.trim()) {
-            answer = whisperTranscript;
-            console.log('✅ Whisper got:', answer.substring(0, 80));
-          } else {
-            console.warn('⚠️ Empty Whisper result');
-            answer = liveTranscript.trim() || '';
-          }
-        } catch (whisperError) {
-          console.error('❌ Whisper stop error:', whisperError.message);
-          answer = liveTranscript.replace('🎤 Listening', '').trim() || '';
-        }
-      }
-
-      console.log('📊 Answer length:', answer.length);
-
-      if (!answer || answer.length < 3) {
-        console.warn('⚠️ Too short - retry');
-        setLoading(false);
-        await new Promise(r => setTimeout(r, 700));
-        await startListeningHandler();
-        return;
-      }
-
-      const cleanAnswer = answer.trim();
-      // CRITICAL: Always spread from ref (answersRef.current) NOT from state (answers)
-      // State updates are async and can be stale, causing lost answers during follow-ups
-      const newAnswers = [...answersRef.current, { q: currentQ, question: currentQuestionText, ans: cleanAnswer }];
-      setAnswers(newAnswers);
-      
-      // IMPORTANT: Use ref to track answers immediately (not async state)
-      answersRef.current = newAnswers;
-      console.log(`✅ Tracked answer ${answersRef.current.length}: Q${currentQ + 1} = "${cleanAnswer.substring(0, 50)}..."`)
-
-      const isNoAnswer = cleanAnswer.toLowerCase().includes('dont know') || 
-                         cleanAnswer.toLowerCase().includes("don't know") ||
-                         cleanAnswer.toLowerCase().includes('not sure') ||
-                         cleanAnswer.length < 5;
-
-      if (isNoAnswer) {
-        stopSpeaking(); // Stop any ongoing speech
-        setLoading(false);
-        setIsAISpeaking(true);
-        await speakCasualFeedback(getNoAnswerFeedback());
-        setIsAISpeaking(false);
-
-        // If time is up, finish after this answer - don't move to next question
-        if (isTimeUp || currentQ >= questions.length - 1 || timeLeft <= 5) {
-          await speakCasualFeedback(getCompletionMessage());
-          setIsAISpeaking(false);
-          await new Promise(r => setTimeout(r, 1000));
-          stopCamera();
-          onFinish(answersRef.current, cleanAnswer);
-        } else if (currentQ < questions.length - 1) {
-          await new Promise(r => setTimeout(r, 1000));
-          setIsAISpeaking(true);
-          await speakCasualFeedback(getTransitionMessage(currentQ, questions.length));
-          setIsAISpeaking(false);
-          
-          setLiveTranscript('');
-          setFinalAnswer('');
-          await new Promise(r => setTimeout(r, 1500));
-          setCurrentQ(c => c + 1);
-        } else {
-          await speakCasualFeedback(getCompletionMessage());
-          setIsAISpeaking(false);
-          await new Promise(r => setTimeout(r, 1000));
-          stopCamera();
-          onFinish(answersRef.current, cleanAnswer);
-        }
-      } else {
-        // Good answer - try to get follow-up (but only 1 per question)
-        // But skip follow-up if time is up
-        setLoading(false);
-        
-        try {
-          if (!followUpAskedForQ && !isTimeUp) {
-            console.log('🔍 Getting follow-up...');
-            const followUpResponse = await getFollowUpQuestion(topic, questions[currentQ], cleanAnswer);
-
-            if (followUpResponse) {
-              setFollowUpAskedForQ(true);
-              setIsAISpeaking(true);
-              
-              if (followUpResponse.type === 'rephrase') {
-                console.log('🔄 Rephrasing...');
-                stopSpeaking(); // Stop any ongoing speech first
-                await new Promise(r => setTimeout(r, 300));
-                setCurrentQuestionText(followUpResponse.text);
-                await speakCasualFeedback(getNoAnswerFeedback());
-                await new Promise(r => setTimeout(r, 800));
-                await speakQuestion(followUpResponse.text);
-                setIsAISpeaking(false);
-                setLiveTranscript('');
-                await new Promise(r => setTimeout(r, 2000));
-                await startListeningHandler();
-                return;
-              } else if (followUpResponse.type === 'followup') {
-                console.log('📝 Following up...');
-                stopSpeaking(); // Stop any ongoing speech first
-                await new Promise(r => setTimeout(r, 300));
-                setCurrentQuestionText(followUpResponse.text);
-                await speakCasualFeedback(getInitialFeedback(cleanAnswer));
-                await new Promise(r => setTimeout(r, 800));
-                await speakQuestion(followUpResponse.text);
-                setIsAISpeaking(false);
-                setLiveTranscript('');
-                await new Promise(r => setTimeout(r, 2000));
-                await startListeningHandler();
-                return;
-              }
-            }
-          }
-
-          stopSpeaking(); // Stop any ongoing speech
-          setIsAISpeaking(true);
-          await speakCasualFeedback(getInitialFeedback(cleanAnswer));
-          
-          // If time is up, finish after this answer - don't move to next question
-          if (isTimeUp || currentQ >= questions.length - 1) {
-            await new Promise(r => setTimeout(r, 500));
-            await speakCasualFeedback(getCompletionMessage());
-            setIsAISpeaking(false);
-            await new Promise(r => setTimeout(r, 1000));
-            stopCamera();
-            onFinish(answersRef.current, cleanAnswer);
-          } else if (currentQ < questions.length - 1) {
-            await new Promise(r => setTimeout(r, 500));
-            await speakCasualFeedback(getTransitionMessage(currentQ, questions.length));
-            setIsAISpeaking(false);
-            setLiveTranscript('');
-            setFinalAnswer('');
-            await new Promise(r => setTimeout(r, 1500));
-            setCurrentQ(c => c + 1);
-          } else {
-            await new Promise(r => setTimeout(r, 500));
-            await speakCasualFeedback(getCompletionMessage());
-            setIsAISpeaking(false);
-            await new Promise(r => setTimeout(r, 1000));
-            stopCamera();
-            onFinish(answersRef.current, cleanAnswer);
-          }
-        } catch (followUpError) {
-          console.error('❌ Follow-up error:', followUpError.message);
-          setIsAISpeaking(false);
-          setLoading(false);
-          // Continue to next question anyway
-          setCurrentQ(c => c + 1);
-        }
-      }
-    } catch (error) {
-      console.error('❌ handleSubmitAnswer error:', error.message);
-      setLoading(false);
-      setIsAISpeaking(false);
-      setIsListening(false);
-      alert('Error occurred. Continuing to next question...');
-      setCurrentQ(c => c + 1);
+    // Stop timers
+    if (recordingTimerRef.current) {
+      clearInterval(recordingTimerRef.current);
+      recordingTimerRef.current = null;
     }
+    if (levelIntervalRef.current) {
+      clearInterval(levelIntervalRef.current);
+      levelIntervalRef.current = null;
+    }
+    setAudioLevel(0);
+
+    // Stop MediaRecorder and collect audio blob
+    let answer = '';
+    const recorder = mediaRecorderRef.current;
+
+    if (recorder && recorder.state !== 'inactive') {
+      // Wait for recorder to stop and fire final ondataavailable
+      await new Promise(resolve => {
+        recorder.onstop = resolve;
+        recorder.stop();
+      });
+    }
+    mediaRecorderRef.current = null;
+
+    // Stop the separate audio stream
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach(t => t.stop());
+      audioStreamRef.current = null;
+    }
+    if (audioContextRef.current) {
+      try { audioContextRef.current.close(); } catch (e) {}
+      audioContextRef.current = null;
+    }
+    analyserRef.current = null;
+
+    // Create blob from recorded chunks
+    const chunks = audioChunksRef.current;
+    const blobType = recorder?.mimeType || 'audio/webm';
+    const audioBlob = new Blob(chunks, { type: blobType });
+    console.log(`📊 Audio blob: ${chunks.length} chunks, ${audioBlob.size} bytes, type: ${blobType}`);
+
+    if (audioBlob.size < 1000) {
+      console.warn('⚠️ Audio blob too small — no audio captured');
+      setLiveTranscript('⚠️ No audio captured — check microphone');
+      answer = '';
+    } else {
+      // Send to Whisper API
+      setLiveTranscript('🔄 Transcribing with Whisper...');
+      const result = await transcribeAudio(audioBlob);
+      if (result.success && result.text && result.text.trim()) {
+        answer = result.text.trim();
+        console.log('✅ Whisper result:', answer.substring(0, 100));
+        setLiveTranscript(answer);
+      } else {
+        // Log exact error for debugging
+        const errDetail = result.error || 'No speech detected';
+        console.warn('⚠️ Whisper failed:', errDetail, '— continuing anyway');
+        setLiveTranscript(`[Transcription failed: ${errDetail}]`);
+        answer = '';
+      }
+    }
+
+    console.log('📤 SUBMIT — Answer:', answer.substring(0, 100) || '(empty)');
+
+    // Store answer
+    const newAnswers = [...answersRef.current, {
+      q: currentQ, question: currentQuestionText, ans: answer
+    }];
+    answersRef.current = newAnswers;
+    setLoading(false);
+
+    // Check if time's up
+    if (isTimeUpRef.current) {
+      console.log('🏁 Time up — finishing');
+      setIsAISpeaking(true);
+      try { await speakCasualFeedback(getCompletionMessage()); } catch (e) {}
+      setIsAISpeaking(false);
+      cleanupAll();
+      isSubmittingRef.current = false;
+      onFinish(answersRef.current, answer);
+      return;
+    }
+
+    // Try follow-up / cross-question (max 1 per main question)
+    if (answer.length >= 20 && followUpAskedForQRef.current !== currentQ) {
+      try {
+        console.log('🔍 Checking for follow-up...');
+        const followUp = await Promise.race([
+          getFollowUpQuestion(topic, questions[currentQ], answer),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
+        ]);
+
+        if (followUp && (followUp.type === 'followup' || followUp.type === 'rephrase')) {
+          followUpAskedForQRef.current = currentQ;
+          console.log('📝 Follow-up:', followUp.text.substring(0, 60));
+
+          setIsAISpeaking(true);
+          try {
+            await speakCasualFeedback(getInitialFeedback(answer));
+          } catch (e) {}
+          setCurrentQuestionText(followUp.text);
+          try {
+            await speakQuestion(followUp.text);
+          } catch (e) {}
+          setIsAISpeaking(false);
+
+          // Reset transcript and listen for follow-up answer
+          setLiveTranscript('');
+          isSubmittingRef.current = false;
+          startListening();
+          return;
+        }
+      } catch (e) {
+        console.warn('Follow-up skipped:', e.message);
+      }
+    }
+
+    // Check if last question
+    if (currentQ >= questions.length - 1) {
+      console.log('🏁 Last question — finishing');
+      setIsAISpeaking(true);
+      try { await speakCasualFeedback(getCompletionMessage()); } catch (e) {}
+      setIsAISpeaking(false);
+      cleanupAll();
+      isSubmittingRef.current = false;
+      onFinish(answersRef.current, answer);
+      return;
+    }
+
+    // Brief feedback
+    if (answer.length > 0) {
+      setIsAISpeaking(true);
+      try { await speakCasualFeedback(getInitialFeedback(answer)); } catch (e) {}
+      setIsAISpeaking(false);
+    }
+
+    // Advance to next question
+    console.log('➡️ Next question');
+    isSubmittingRef.current = false;
+    lastAskedQRef.current = -1;
+    setCurrentQ(prev => prev + 1);
   };
 
-  const handleQuit = () => {
-    setShowQuitConfirm(true);
+  // ========================
+  // QUIT
+  // ========================
+  const handleQuit = () => setShowQuitConfirm(true);
+  const cancelQuit = () => setShowQuitConfirm(false);
+  const confirmQuit = () => {
+    cleanupAll();
+    onFinish(answersRef.current, '');
   };
 
-  const confirmQuit = async () => {
-    stopCamera();
-    console.log('📊 Quit with answers:', answersRef.current);
-    onFinish(answersRef.current, '');  // Pass collected answers, not state
-  };
-
-  const cancelQuit = () => {
-    setShowQuitConfirm(false);
-  };
-
+  // ========================
+  // RENDER
+  // ========================
   return (
     <div className="interview-wrapper" style={{
       height: '100vh', background: '#1a1a1a', color: 'white',
@@ -453,14 +421,6 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.6; }
         }
-        
-        @keyframes ellipsis {
-          0%, 20% { content: ''; }
-          40% { content: '.'; }
-          60% { content: '..'; }
-          80%, 100% { content: '...'; }
-        }
-        
         @media (max-width: 1023px) {
           .interview-wrapper {
             flex-direction: column !important;
@@ -502,7 +462,6 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
             margin-bottom: 20px !important;
           }
         }
-        
         @media (max-width: 480px) {
           .video-stream {
             max-height: 60vw !important;
@@ -521,7 +480,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
       }}>
         <div style={{
           position: 'absolute', top: 20, left: 20,
-          fontSize: '24px', fontWeight: 'bold', 
+          fontSize: '24px', fontWeight: 'bold',
           background: isTimeUp ? 'rgba(220, 53, 69, 0.9)' : 'rgba(0,0,0,0.7)',
           padding: '10px 20px', borderRadius: '10px',
           color: isTimeUp ? '#fff' : 'inherit',
@@ -531,12 +490,9 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           {isTimeUp ? '⏰ TIME UP - SUBMIT TO FINISH' : `⏱️ ${formatTime(timeLeft)}`}
         </div>
 
-        {/* CAMERA - 400px */}
         <video
           ref={videoRef}
-          autoPlay 
-          muted
-          playsInline
+          autoPlay muted playsInline
           className="video-stream"
           style={{
             width: '400px', height: '400px', objectFit: 'cover',
@@ -581,7 +537,7 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
         </div>
       </div>
 
-      {/* RIGHT: Transcript with Status */}
+      {/* RIGHT: Transcript */}
       <div className="transcript-section" style={{
         flex: 1, display: 'flex', flexDirection: 'column',
         background: 'rgba(255,255,255,0.05)', borderRadius: '20px',
@@ -591,46 +547,53 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
           padding: '20px', background: 'rgba(0,120,212,0.2)',
           borderRadius: '15px', borderLeft: '4px solid #0078d4'
         }}>
-          <p style={{ fontSize: '16px', marginTop: '0px', color: '#fff', lineHeight: '1.6' }}>
+        <p style={{ fontSize: '16px', marginTop: '0px', color: '#fff', lineHeight: '1.6' }}>
             {currentQuestionText || questions[currentQ]}
           </p>
         </div>
 
         <div style={{
           padding: '20px', background: 'rgba(255,255,255,0.1)',
-          borderRadius: '15px', flex: 1, overflowY: 'auto',
-          minHeight: '200px'
+          borderRadius: '15px', flex: 1, overflowY: 'auto', minHeight: '200px'
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '15px', minHeight: '28px' }}>
             {isAISpeaking ? (
               <span style={{ fontSize: '14px', color: '#FFB74D', fontStyle: 'italic', fontWeight: 'bold' }}>
-                🎙️ AI is asking...
-              </span>
-            ) : isListening && !loading ? (
-              <span style={{ fontSize: '14px', color: '#4CAF50', fontStyle: 'italic', fontWeight: 'bold' }}>
-                🎤 Listening
+                🎙️ AI is speaking...
               </span>
             ) : loading ? (
               <span style={{ fontSize: '14px', color: '#FFC107', fontStyle: 'italic', fontWeight: 'bold' }}>
-                ⏳ Processing
+                ⏳ Processing...
               </span>
-            ) : (liveTranscript || finalAnswer) ? (
-              <strong style={{ fontSize: '14px', color: '#aaa' }}>YOUR RESPONSE:</strong>
+            ) : isListening ? (
+              <span style={{ fontSize: '14px', color: '#4CAF50', fontStyle: 'italic', fontWeight: 'bold' }}>
+                🎤 Recording — {recordingTime}s (continuous, no limit)
+                <span style={{
+                  display: 'inline-block', width: '60px', height: '8px',
+                  background: '#333', borderRadius: '4px', marginLeft: '10px',
+                  verticalAlign: 'middle', overflow: 'hidden'
+                }}>
+                  <span style={{
+                    display: 'block', height: '100%', borderRadius: '4px',
+                    width: `${audioLevel}%`,
+                    background: audioLevel > 30 ? '#4CAF50' : audioLevel > 10 ? '#FFC107' : '#666',
+                    transition: 'width 0.1s'
+                  }} />
+                </span>
+                {audioLevel < 5 && recordingTime > 2 ? ' ⚠️ No audio detected!' : ''}
+              </span>
             ) : null}
           </div>
           <p style={{
-            marginTop: '0px', fontSize: '16px',
-            color: '#fff',
-            whiteSpace: 'pre-wrap',
-            lineHeight: '1.6',
-            minHeight: '50px'
+            marginTop: '0px', fontSize: '16px', color: '#fff',
+            whiteSpace: 'pre-wrap', lineHeight: '1.6', minHeight: '50px'
           }}>
-            {liveTranscript || finalAnswer}
+            {liveTranscript}
           </p>
         </div>
       </div>
 
-      {/* Quit Confirmation Modal */}
+      {/* Quit Modal */}
       {showQuitConfirm && (
         <div style={{
           position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
@@ -639,46 +602,21 @@ const Interview = ({ topic, duration, questions, onFinish, onQuit }) => {
         }}>
           <div style={{
             background: '#1a1a1a', padding: '40px', borderRadius: '20px',
-            border: '2px solid #0078d4', maxWidth: '500px', textAlign: 'center',
-            color: 'white'
+            border: '2px solid #0078d4', maxWidth: '500px', textAlign: 'center', color: 'white'
           }}>
-            <h2 style={{ marginTop: 0, color: '#0078d4' }}>Interview Summary</h2>
-            
-            <div style={{
-              background: 'rgba(0,120,212,0.2)', padding: '20px',
-              borderRadius: '15px', marginBottom: '25px', fontSize: '18px'
-            }}>
-              <strong>Questions Asked: {answers.length}</strong>
-              <p style={{ marginTop: '10px', fontSize: '14px', color: '#aaa' }}>
-                You answered {answers.length} question{answers.length !== 1 ? 's' : ''} during this interview.
-              </p>
-            </div>
-
+            <h2 style={{ marginTop: 0, color: '#0078d4' }}>Quit Interview?</h2>
             <p style={{ marginBottom: '30px', fontSize: '16px', color: '#ccc' }}>
-              Are you sure you want to quit the interview?
+              You answered {answersRef.current.length} question{answersRef.current.length !== 1 ? 's' : ''}. Are you sure?
             </p>
-
             <div style={{ display: 'flex', gap: '15px', justifyContent: 'center' }}>
-              <button
-                onClick={confirmQuit}
-                style={{
-                  padding: '12px 30px', fontSize: '16px',
-                  background: '#a4262e', color: 'white', border: 'none',
-                  borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold'
-                }}
-              >
-                Yes, Quit
-              </button>
-              <button
-                onClick={cancelQuit}
-                style={{
-                  padding: '12px 30px', fontSize: '16px',
-                  background: '#0078d4', color: 'white', border: 'none',
-                  borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold'
-                }}
-              >
-                Continue Interview
-              </button>
+              <button onClick={confirmQuit} style={{
+                padding: '12px 30px', fontSize: '16px', background: '#a4262e',
+                color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold'
+              }}>Yes, Quit</button>
+              <button onClick={cancelQuit} style={{
+                padding: '12px 30px', fontSize: '16px', background: '#0078d4',
+                color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold'
+              }}>Continue</button>
             </div>
           </div>
         </div>
